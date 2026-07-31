@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Delete,
+  GatewayTimeoutException,
   Get,
   Param,
   Patch,
@@ -13,8 +14,6 @@ import {
 } from '@nestjs/common';
 import { SocketGateway } from './socket/socket.gateway';
 import { Request, Response } from 'express';
-import { Cron } from '@nestjs/schedule';
-import { GatewayTimeoutException } from '@nestjs/common';
 
 const getTrimRoute = (route: string) => {
   const regex = /\/app\/([^\/]+)\/([^\/]+)/g;
@@ -73,7 +72,7 @@ export class AppController {
   private async handleHttpRequest(roomId: string, payload: any, res: Response) {
     try {
       const response = await this.gateway.sendToRoomAndWait(roomId, payload);
-      res.json(response);
+      res.status(200).json(response);
     } catch (error) {
       if (error instanceof GatewayTimeoutException) {
         const html = this.buildTimeoutHtml(error.message);

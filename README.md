@@ -153,6 +153,8 @@ curl -X POST http://localhost:3000/app/<roomId>/v1/chat/completions \
 
 Add `"stream": true` to any POST body (or `?stream=true` as a query param) to receive a **Server-Sent Events (SSE)** stream instead of a single JSON response.
 
+The server also detects an `Accept: text/event-stream` request header (used by clients like the VS Code Copilot SDK) and streams SSE automatically, even without an explicit `stream` flag.
+
 For `/v1/responses` routes the server emits the full OpenAI Responses API event sequence:
 
 ```

@@ -7,7 +7,8 @@ export class StreamMiddleware implements NestMiddleware {
     const isStream =
       req.body?.stream === true ||
       req.body?.stream === 'true' ||
-      req.query?.stream === 'true';
+      req.query?.stream === 'true' ||
+      (req.headers?.accept || '').includes('text/event-stream');
     if (isStream) {
       res.json = function (body: any) {
         res.setHeader('Content-Type', 'text/event-stream');
