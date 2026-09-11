@@ -26,6 +26,9 @@ async function bootstrap() {
       if (allowAll) return callback(null, true);
       if (origin.startsWith('chrome-extension://')) return callback(null, true);
       if (origin.startsWith('moz-extension://')) return callback(null, true);
+      if (['https://chatgpt.com', 'https://claude.ai', 'https://chat.z.ai'].includes(origin)) {
+        return callback(null, true);
+      }
       if (configuredOrigins.includes(origin)) return callback(null, true);
       return callback(new Error(`CORS origin not allowed: ${origin}`), false);
     },
