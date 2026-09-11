@@ -2,8 +2,8 @@ import {
   Body,
   Controller,
   Delete,
-  GatewayTimeoutException,
   Get,
+  HttpException,
   Param,
   Patch,
   Post,
@@ -12,74 +12,183 @@ import {
   Req,
   Res,
 } from '@nestjs/common';
-import { SocketGateway } from './socket/socket.gateway';
 import { Request, Response } from 'express';
+import { SocketGateway } from './socket/socket.gateway';
 
 const getTrimRoute = (route: string) => {
-  const regex = /\/app\/([^\/]+)\/([^\/]+)/g;
-
-  // Replace with the desired structure, e.g., '/newpath/:id/*' while keeping :id and * intact
-  const newString = route.replace(regex, (match, id, response) => {
-    return response; // Replace with new path structure
-  });
-  return newString;
+  const match = route.match(/^\/app\/[^/]+\/(.+)$/);
+  return match?.[1] || route;
 };
 
 @Controller('app')
 export class AppController {
   constructor(private readonly gateway: SocketGateway) {}
 
-  private buildTimeoutHtml(message: string) {
-    const setupUrl = 'https://github.com/niteshSingh17/apibeam/#apibeam';
-    return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Gateway Timeout</title>
-  <style>
-    body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center; background: #f4f6fb; color: #111827; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    .card { max-width: 680px; width: 100%; margin: 20px; padding: 32px; background: #fff; border-radius: 24px; box-shadow: 0 25px 50px rgba(15,23,42,0.08); border: 1px solid #e5e7eb; }
-    .badge { display: inline-flex; align-items: center; gap: 0.5rem; background: #eef2ff; color: #1d4ed8; border-radius: 999px; padding: 0.5rem 0.9rem; font-weight: 700; font-size: 0.9rem; }
-    .title { margin: 20px 0 8px; font-size: 2.6rem; line-height: 1.05; letter-spacing: -0.04em; }
-    .subtitle { margin: 0 0 20px; color: #4b5563; font-size: 1rem; }
-    .message { margin: 0; font-size: 1.05rem; line-height: 1.8; color: #1f2937; }
-    .link { display: inline-flex; margin-top: 24px; color: #1d4ed8; text-decoration: none; font-weight: 600; }
-    .link:hover { text-decoration: underline; }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <span class="badge">Gateway timeout</span>
-    <h1 class="title">Request timed out</h1>
-    <p class="subtitle">The requested action did not complete in time.</p>
-    <p class="message">${this.escapeHtml(message)}</p>
-    <a class="link" href="${setupUrl}" target="_blank" rel="noreferrer">View setup instructions</a>
-  </div>
-</body>
-</html>`;
+  @Get('health')
+  health() {
+    return {
+      status: 'ok',
+      service: 'apibeam-api-server',
+      timestamp: new Date().toISOString(),
+    };
   }
 
-  private escapeHtml(value: string) {
-    return value
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&#039;');
+  private getConfiguredModels() {
+    const configured = (process.env.APIBEAM_MODELS || 'gpt-5.6-sol,gpt-4o')
+      .split(',')
+      .map((model) => model.trim())
+      .filter(Boolean);
+
+    return {
+      object: 'list',
+      data: configured.map((id) => ({
+        id,
+        object: 'model',
+        created: 0,
+        owned_by: 'apibeam',
+      })),
+    };
   }
 
-  private async handleHttpRequest(roomId: string, payload: any, res: Response) {
+  @Get(':roomId/models')
+  models() {
+    return this.getConfiguredModels();
+  }
+
+  @Get(':roomId/v1/models')
+  v1Models() {
+    return this.getConfiguredModels();
+  }
+
+  @Get(':roomId/status')
+  roomStatus(@Param('roomId') roomId: string) {
+    return {
+      roomId,
+      connected: this.gateway.isRoomConnected(roomId),
+    };
+  }
+
+  private extractText(value: any): string | null {
+    if (typeof value === 'string') return value;
+    if (!value || typeof value !== 'object') return null;
+
+    if (typeof value.text === 'string') return value.text;
+    if (typeof value.output_text === 'string') return value.output_text;
+
+    const choiceContent = value.choices?.[0]?.message?.content;
+    if (typeof choiceContent === 'string') return choiceContent;
+    if (Array.isArray(choiceContent)) {
+      const text = choiceContent
+        .map((part: any) =>
+          typeof part === 'string'
+            ? part
+            : typeof part?.text === 'string'
+              ? part.text
+              : '',
+        )
+        .join('');
+      if (text) return text;
+    }
+
+    const output = value.output;
+    if (Array.isArray(output)) {
+      const chunks: string[] = [];
+      for (const item of output) {
+        if (!Array.isArray(item?.content)) continue;
+        for (const part of item.content) {
+          if (typeof part?.text === 'string') chunks.push(part.text);
+        }
+      }
+      if (chunks.length) return chunks.join('');
+    }
+
+    return null;
+  }
+
+  private normalizeResponse(route: string, requestBody: any, response: any) {
+    if (response?.error) return response;
+
+    const normalizedRoute = route.replace(/^\/+/, '');
+    const model = requestBody?.model || response?.model || 'gpt-5.6-sol';
+
+    if (normalizedRoute.endsWith('chat/completions')) {
+      if (Array.isArray(response?.choices)) return response;
+
+      const text = this.extractText(response);
+      return {
+        id: `chatcmpl_${Date.now()}`,
+        object: 'chat.completion',
+        created: Math.floor(Date.now() / 1000),
+        model,
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: 'assistant',
+              content: text ?? JSON.stringify(response ?? {}),
+            },
+            finish_reason: 'stop',
+          },
+        ],
+        usage: {
+          prompt_tokens: 0,
+          completion_tokens: 0,
+          total_tokens: 0,
+        },
+      };
+    }
+
+    if (normalizedRoute.endsWith('responses')) {
+      if (response?.object === 'response' && Array.isArray(response?.output)) {
+        return response;
+      }
+
+      const text = this.extractText(response) ?? JSON.stringify(response ?? {});
+      return {
+        id: `resp_${Date.now()}`,
+        object: 'response',
+        created_at: Math.floor(Date.now() / 1000),
+        status: 'completed',
+        model,
+        output: [
+          {
+            id: `msg_${Date.now()}`,
+            type: 'message',
+            role: 'assistant',
+            status: 'completed',
+            content: [{ type: 'output_text', text }],
+          },
+        ],
+      };
+    }
+
+    return response;
+  }
+
+  private async handleHttpRequest(
+    roomId: string,
+    payload: any,
+    res: Response,
+  ) {
     try {
       const response = await this.gateway.sendToRoomAndWait(roomId, payload);
-      res.status(200).json(response);
+      const normalized = this.normalizeResponse(
+        payload.route || '',
+        payload.body,
+        response,
+      );
+      res.status(200).json(normalized);
     } catch (error) {
-      if (error instanceof GatewayTimeoutException) {
-        const html = this.buildTimeoutHtml(error.message);
-        res.status(504).type('text/html').send(html);
-        return;
-      }
-      throw error;
+      const status = error instanceof HttpException ? error.getStatus() : 502;
+      const message = error instanceof Error ? error.message : String(error);
+
+      res.status(status).json({
+        error: {
+          message,
+          type: status === 504 ? 'gateway_timeout' : 'apibeam_relay_error',
+          code: status === 504 ? 'apibeam_timeout' : 'apibeam_relay_error',
+        },
+      });
     }
   }
 
@@ -92,7 +201,7 @@ export class AppController {
     return this.handleHttpRequest(
       roomId,
       {
-        model: 'gpt-4o',
+        model: 'gpt-5.6-sol',
         instructions:
           'You are a personal assistant who is here to help me with my problems',
         body: message,
@@ -113,8 +222,8 @@ export class AppController {
     return this.handleHttpRequest(
       roomId,
       {
-        ...body,
-        route: route,
+        body,
+        route,
       },
       res,
     );
@@ -131,8 +240,8 @@ export class AppController {
     return this.handleHttpRequest(
       roomId,
       {
-        body: body,
-        route: route,
+        body,
+        route,
       },
       res,
     );
@@ -146,14 +255,7 @@ export class AppController {
     @Res() res: Response,
   ) {
     const route = getTrimRoute(request.path);
-    return this.handleHttpRequest(
-      roomId,
-      {
-        ...body,
-        route: route,
-      },
-      res,
-    );
+    return this.handleHttpRequest(roomId, { body, route }, res);
   }
 
   @Put(':roomId/*')
@@ -164,14 +266,7 @@ export class AppController {
     @Res() res: Response,
   ) {
     const route = getTrimRoute(request.path);
-    return this.handleHttpRequest(
-      roomId,
-      {
-        ...body,
-        route: route,
-      },
-      res,
-    );
+    return this.handleHttpRequest(roomId, { body, route }, res);
   }
 
   @Delete(':roomId/*')
@@ -182,13 +277,6 @@ export class AppController {
     @Res() res: Response,
   ) {
     const route = getTrimRoute(request.path);
-    return this.handleHttpRequest(
-      roomId,
-      {
-        ...body,
-        route: route,
-      },
-      res,
-    );
+    return this.handleHttpRequest(roomId, { body, route }, res);
   }
 }
