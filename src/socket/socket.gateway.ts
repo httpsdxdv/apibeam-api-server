@@ -1,11 +1,21 @@
 import {
-  WebSocketGateway,
-  SubscribeMessage,
+  ServiceUnavailableException,
+  GatewayTimeoutException,
+} from '@nestjs/common';
+import {
   MessageBody,
+  SubscribeMessage,
+  WebSocketGateway,
   WebSocketServer,
 } from '@nestjs/websockets';
-import { GatewayTimeoutException } from '@nestjs/common';
+import { randomUUID } from 'crypto';
 import { Server, Socket } from 'socket.io';
+
+type PendingResponse = {
+  roomId: string;
+  resolve: (msg: any) => void;
+  reject: (error: unknown) => void;
+};
 
 @WebSocketGateway({
   cors: { origin: '*' },
@@ -14,69 +24,109 @@ export class SocketGateway {
   @WebSocketServer()
   server: Server;
 
-  private pendingResponses = new Map<string, (msg: any) => void>();
+  private pendingResponses = new Map<string, PendingResponse>();
   private pendingTimeouts = new Map<string, NodeJS.Timeout>();
 
+  private get requestTimeoutMs() {
+    const configured = Number(process.env.APIBEAM_REQUEST_TIMEOUT_MS || 180000);
+    return Number.isFinite(configured) && configured > 0 ? configured : 180000;
+  }
+
+  isRoomConnected(roomId: string) {
+    return (this.server?.sockets.adapter.rooms.get(roomId)?.size || 0) > 0;
+  }
+
   /**
-   * HTTP Route calls this to emit message and wait for response
+   * HTTP route calls this to emit a request and wait for the matching response.
+   * Every request has its own requestId, so concurrent HTTP requests cannot
+   * overwrite one another even when they use the same room.
    */
   async sendToRoomAndWait(roomId: string, message: any): Promise<any> {
+    if (!this.isRoomConnected(roomId)) {
+      throw new ServiceUnavailableException(
+        'No ApiBeam browser extension is connected to this room. Open the extension and connect it before sending API requests.',
+      );
+    }
+
+    const requestId = randomUUID();
+
     return new Promise((resolve, reject) => {
-      // Save resolver so WS response can resolve this HTTP request
-      this.pendingResponses.set(roomId, resolve);
+      this.pendingResponses.set(requestId, { roomId, resolve, reject });
 
       const timeout = setTimeout(() => {
-        if (this.pendingResponses.has(roomId)) {
-          this.pendingResponses.delete(roomId);
-          this.pendingTimeouts.delete(roomId);
-          console.log('api timeout');
-          reject(
-            new GatewayTimeoutException(
-              `Request timed out. The ChatGPT tab opened by the extension may have been closed or is no longer available. Please reopen the tab and try again.
-              Please watch this video for help you are very close to getting it working:
-              https://github.com/niteshSingh17/apibeam/#apibeam`,
-            ),
-          );
-        }
-      }, 60000);
+        const pending = this.pendingResponses.get(requestId);
+        if (!pending) return;
 
-      // Emit event to room
-      this.server.to(roomId).emit('serverMessage', message);
-      this.pendingTimeouts.set(roomId, timeout);
+        this.pendingResponses.delete(requestId);
+        this.pendingTimeouts.delete(requestId);
+
+        // Tell the extension to abandon/reset this browser request so its queue
+        // can continue instead of becoming permanently stuck.
+        this.server.to(roomId).emit('cancelRequest', { requestId });
+
+        reject(
+          new GatewayTimeoutException(
+            `ApiBeam request ${requestId} timed out after ${this.requestTimeoutMs}ms while waiting for the browser response.`,
+          ),
+        );
+      }, this.requestTimeoutMs);
+
+      this.pendingTimeouts.set(requestId, timeout);
+      this.server.to(roomId).emit('serverMessage', {
+        ...message,
+        requestId,
+      });
     });
   }
 
-  /**
-   * Client responds from room → resolve the pending HTTP request
-   */
   @SubscribeMessage('clientResponse')
-  handleClientResponse(@MessageBody() data: { roomId: string; message: any }) {
+  handleClientResponse(
+    @MessageBody()
+    data: { roomId: string; requestId?: string; message: any },
+  ) {
     const { roomId, message } = data;
-    const resolver = this.pendingResponses.get(roomId);
-    const timeout = this.pendingTimeouts.get(roomId);
+    let requestId = data.requestId;
+
+    // Backward-compatible fallback for an older extension. The patched
+    // extension always sends requestId, but this lets one in-flight legacy
+    // request still complete instead of failing outright.
+    if (!requestId) {
+      requestId = Array.from(this.pendingResponses.entries()).find(
+        ([, pending]) => pending.roomId === roomId,
+      )?.[0];
+    }
+
+    if (!requestId) {
+      console.warn('ApiBeam received a response without a matching requestId');
+      return;
+    }
+
+    const pending = this.pendingResponses.get(requestId);
+    if (!pending || pending.roomId !== roomId) {
+      console.warn(`Ignoring late or unknown ApiBeam response ${requestId}`);
+      return;
+    }
+
+    const timeout = this.pendingTimeouts.get(requestId);
     if (timeout) {
       clearTimeout(timeout);
-      this.pendingTimeouts.delete(roomId);
+      this.pendingTimeouts.delete(requestId);
     }
-    if (resolver) {
-      resolver(message); // Fulfill HTTP request
-      this.pendingResponses.delete(roomId);
-    }
+
+    pending.resolve(message);
+    this.pendingResponses.delete(requestId);
   }
 
-  // When API tells user to join room
   joinRoom(client: Socket, roomId: string) {
     client.join(roomId);
     console.log(`Client ${client.id} joined room: ${roomId}`);
     this.server.to(roomId).emit('roomJoined', { roomId });
   }
 
-  // Socket connected
   handleConnection(socket: Socket) {
     console.log('Client connected:', socket.id);
   }
 
-  // Socket disconnected
   handleDisconnect(socket: Socket) {
     console.log('Client disconnected:', socket.id);
   }
