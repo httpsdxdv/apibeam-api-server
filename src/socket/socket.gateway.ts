@@ -1,4 +1,4 @@
-﻿import {
+import {
   GatewayTimeoutException,
   ServiceUnavailableException,
 } from '@nestjs/common';
@@ -51,6 +51,19 @@ export class SocketGateway {
 
   isRoomConnected(roomId: string) {
     return this.isSocketRoomConnected(roomId) || this.isHttpBridgeConnected(roomId);
+  }
+
+  getRoomTransportStatus(roomId: string) {
+    const lastSeen = this.httpBridgeLastSeen.get(roomId) || 0;
+    const httpBridgeConnected = this.isHttpBridgeConnected(roomId);
+    const socketConnected = this.isSocketRoomConnected(roomId);
+    return {
+      connected: socketConnected || httpBridgeConnected,
+      socketConnected,
+      httpBridgeConnected,
+      httpBridgeAgeMs: lastSeen ? Math.max(0, Date.now() - lastSeen) : null,
+      queuedHttpRequests: this.httpQueues.get(roomId)?.length || 0,
+    };
   }
 
   touchHttpBridge(roomId: string) {

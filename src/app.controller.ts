@@ -64,7 +64,7 @@ export class AppController {
   roomStatus(@Param('roomId') roomId: string) {
     return {
       roomId,
-      connected: this.gateway.isRoomConnected(roomId),
+      ...this.gateway.getRoomTransportStatus(roomId),
     };
   }
 
