@@ -1,4 +1,4 @@
-import { Controller, Get, Param, Query } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Query } from '@nestjs/common';
 import { SocketGateway } from './socket.gateway';
 
 @Controller('connect')
@@ -23,5 +23,18 @@ export class SocketController {
       joined: roomId,
       socketId,
     };
+  }
+
+  @Get(':roomId/next')
+  next(@Param('roomId') roomId: string) {
+    return { request: this.gateway.getNextHttpRequest(roomId) };
+  }
+
+  @Post(':roomId/response')
+  response(
+    @Param('roomId') roomId: string,
+    @Body() body: { requestId?: string; message: any },
+  ) {
+    return this.gateway.respondFromHttpBridge({ roomId, ...body });
   }
 }
