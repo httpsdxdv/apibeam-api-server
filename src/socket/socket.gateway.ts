@@ -1,4 +1,4 @@
-import {
+﻿import {
   GatewayTimeoutException,
   ServiceUnavailableException,
 } from '@nestjs/common';
@@ -152,7 +152,12 @@ export class SocketGateway {
 
       this.pendingTimeouts.set(requestId, timeout);
 
-      if (this.isSocketRoomConnected(roomId)) {
+      // Prefer the persistent HTTP bridge when the dedicated provider tab is alive.
+      // Firefox MV3 background workers may be evicted at any time, so an active
+      // Socket.IO connection is only the fallback transport for this room.
+      if (this.isHttpBridgeConnected(roomId)) {
+        this.enqueueHttpRequest(roomId, relayRequest);
+      } else if (this.isSocketRoomConnected(roomId)) {
         this.server.to(roomId).emit('serverMessage', relayRequest);
       } else {
         this.enqueueHttpRequest(roomId, relayRequest);
@@ -181,3 +186,4 @@ export class SocketGateway {
     console.log('Client disconnected:', socket.id);
   }
 }
+
