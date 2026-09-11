@@ -1,0 +1,15 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: apibeam-api:local
+    ports:
+      - "127.0.0.1:${APIBEAM_PORT:-3000}:3000"
+    environment:
+      PORT: 3000
+      NODE_ENV: production
+      APIBEAM_REQUEST_TIMEOUT_MS: ${APIBEAM_REQUEST_TIMEOUT_MS:-180000}
+      APIBEAM_MODELS: ${APIBEAM_MODELS:-gpt-5.6-sol,gpt-4o}
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+    restart: unless-stopped
